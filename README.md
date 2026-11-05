@@ -13,6 +13,17 @@ Das Fenster aktualisiert sich automatisch alle 1,5 Sekunden (neue Geräte,
 neu gestartete Programme, Änderungen aus dem Windows-Mixer). Regler lassen sich
 auch mit dem Mausrad bedienen. Optional: „Immer im Vordergrund“.
 
+## Design: Zephyr
+
+Die Oberfläche nutzt die Designsprache **Zephyr** wie Zephyr Mail: Graphit mit rotem Akzent, flache Karten,
+hell und dunkel (Knopf oben rechts) und die Farbpaletten aus Zephyr 1.2 (Auswahlliste oben).
+Die Wahl wird unter `%LOCALAPPDATA%\SoundControl\einstellungen.json` gespeichert.
+`zephyr_tk.py` muss im selben Ordner wie das Programm liegen.
+
+| Dunkel | Hell |
+|---|---|
+| ![SoundControl dunkel](docs/soundcontrol_dark.png) | ![SoundControl hell](docs/soundcontrol_light.png) |
+
 ## Tray-Icon (Infobereich unten rechts)
 
 - **Linksklick** auf das Lautsprecher-Symbol: Fenster öffnen bzw. verstecken.

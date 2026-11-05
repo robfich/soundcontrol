@@ -2,10 +2,12 @@
 SoundControl - einfache Soundsteuerung für Windows.
 
 Ein einziges Fenster (ohne Scrollen) mit:
-  * allen Ausgabegeraeten  -> Klick auf ein Gerät macht es zum Standardgerät
+  * allen Ausgabegeräten  -> Klick auf ein Gerät macht es zum Standardgerät
   * allen Eingabegeräten  -> Klick auf ein Gerät macht es zum Standardgerät
   * Lautstärke + Stumm für das aktuelle Ausgabe- und Eingabegerät
   * Lautstärke + Stumm für jede Anwendung, die gerade Audio nutzt
+
+Design: Zephyr (zephyr_tk.py im selben Ordner), hell/dunkel + Farbpaletten.
 
 Benötigt: Windows, Python 3.8+, pycaw, comtypes, psutil, pystray, Pillow
     pip install -r requirements.txt
@@ -20,11 +22,15 @@ Minimieren oder Schließen (X) schickt das Fenster in den Tray, "Beenden" im
 Tray-Menü beendet das Programm.
 """
 
+import os
 import queue
 import sys
 import threading
 import tkinter as tk
 from tkinter import ttk
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import zephyr_tk as z   # Zephyr-Design (Datei liegt neben diesem Programm)
 
 REFRESH_MS = 1500        # wie oft Geräte/Anwendungen neu eingelesen werden
 APP_COLUMNS = 2          # Spalten für Anwendungen (bei mehr als 8 Anwendungen automatisch 3)
@@ -291,89 +297,117 @@ class DemoAudioBackend:
 
 
 # ---------------------------------------------------------------------------
-# Oberfläche
+# Oberfläche im Zephyr-Design (zephyr_tk.py liegt im selben Ordner)
 # ---------------------------------------------------------------------------
-class VolumeRow:
-    """Eine Zeile: [Name] [Stumm] [Schieberegler 0-100]."""
+# Zusätzliche Symbole (Segoe MDL2 Assets, Ersatzzeichen ohne diese Schrift)
+z.ICONS.setdefault("volume", (chr(0xE767), "♪"))
+z.ICONS.setdefault("mute", (chr(0xE74F), "×"))
+z.ICONS.setdefault("speaker", (chr(0xE7F5), "♪"))
+z.ICONS.setdefault("mic", (chr(0xE720), "●"))
+z.ICONS.setdefault("pin", (chr(0xE718), "⊤"))
 
-    def __init__(self, parent, row, label, on_volume, on_mute, label_width=18, length=220):
+
+class VolumeRow:
+    """Eine Zeile im Zephyr-Stil: [Name] [Regler] [45 %] [Stumm]."""
+
+    def __init__(self, ui, parent, name, on_volume, on_mute, name_width=14, length=210):
+        self.ui = ui
         self._on_volume = on_volume
         self._on_mute = on_mute
         self._busy = False        # True, während der Wert programmatisch gesetzt wird
-        self.dragging = False     # True, während die Maus den Regler haelt
+        self.dragging = False     # True, während die Maus den Regler hält
+        self.muted = False
+        self.enabled = True
+        t, bg = ui.t, parent.cget("bg")
 
-        self.label = ttk.Label(parent, text=label, width=label_width, anchor="w")
-        self.label.grid(row=row, column=0, sticky="w", padx=(0, 4))
-
-        self.mute_var = tk.BooleanVar()
-        self.mute_btn = ttk.Checkbutton(parent, text="Stumm", variable=self.mute_var,
-                                        command=self._mute_changed)
-        self.mute_btn.grid(row=row, column=1, sticky="w", padx=4)
-
-        self.scale = tk.Scale(parent, from_=0, to=100, orient="horizontal", length=length,
-                              showvalue=True, command=self._volume_changed,
-                              highlightthickness=0, sliderlength=18, width=12)
-        self.scale.grid(row=row, column=2, sticky="we", padx=4)
+        self.frame = tk.Frame(parent, bg=bg)
+        self.name = tk.Label(self.frame, text=name, font=ui.f["btn"], bg=bg, fg=t["text"],
+                             width=name_width, anchor="w")
+        self.name.pack(side="left")
+        self.scale = ttk.Scale(self.frame, from_=0, to=100, orient="horizontal",
+                               length=ui.px(length), command=self._volume_changed)
+        self.scale.pack(side="left", padx=(ui.px(6), ui.px(8)))
+        self.value = tk.Label(self.frame, text="0 %", font=ui.f["small"], bg=bg, fg=t["dim"],
+                              width=5, anchor="e")
+        self.value.pack(side="left")
+        self.mute = tk.Label(self.frame, font=ui.f["small"], padx=ui.px(10), pady=ui.px(3),
+                             cursor="hand2")
+        self.mute.pack(side="left", padx=(ui.px(10), 0))
+        self.mute.bind("<ButtonRelease-1>", lambda e: self.enabled and self._on_mute(not self.muted))
+        self.mute.bind("<Enter>", lambda e: not self.muted and self.enabled
+                       and self.mute.configure(bg=t["hover"]))
+        self.mute.bind("<Leave>", lambda e: self._paint_mute())
         self.scale.bind("<ButtonPress-1>", lambda e: setattr(self, "dragging", True))
         self.scale.bind("<ButtonRelease-1>", lambda e: setattr(self, "dragging", False))
-        self.scale.bind("<MouseWheel>", self._wheel)
+        for w in (self.scale, self.name, self.value):
+            w.bind("<MouseWheel>", self._wheel)
+        self._paint_mute()
+
+    def _paint_mute(self):
+        t, ui = self.ui.t, self.ui
+        if self.muted:   # Stumm = Akzent (rot), wie ein gewählter Chip
+            self.mute.configure(text=ui.icon("mute") + "  Stumm", bg=t["accent"], fg=t["on_accent"])
+        else:
+            self.mute.configure(text=ui.icon("volume") + "  Stumm", bg=t["card2"],
+                                fg=t["dim"] if self.enabled else t["line"])
 
     def _wheel(self, event):
-        step = 2 if event.delta > 0 else -2
-        self.scale.set(max(0, min(100, int(self.scale.get()) + step)))
+        if self.enabled:
+            step = 2 if event.delta > 0 else -2
+            self.scale.set(max(0, min(100, round(float(self.scale.get())) + step)))
 
     def _volume_changed(self, value):
-        if not self._busy:
-            self._on_volume(int(float(value)))
+        v = round(float(value))
+        self.value.configure(text="%d %%" % v)
+        if not self._busy and self.enabled:
+            self._on_volume(v)
 
-    def _mute_changed(self):
-        if not self._busy:
-            self._on_mute(self.mute_var.get())
-
-    def update(self, volume, muted, label=None):
+    def update(self, volume, muted):
         self._busy = True
         try:
-            if label is not None:
-                self.label.configure(text=label)
-            if not self.dragging and int(self.scale.get()) != volume:
+            if not self.dragging and round(float(self.scale.get())) != volume:
                 self.scale.set(volume)
-            if self.mute_var.get() != muted:
-                self.mute_var.set(muted)
+            self.value.configure(text="%d %%" % round(float(self.scale.get())))
+            if muted != self.muted:
+                self.muted = muted
+                self._paint_mute()
         finally:
             self._busy = False
 
     def set_enabled(self, enabled):
-        state = "normal" if enabled else "disabled"
-        self.scale.configure(state=state)
-        self.mute_btn.configure(state=state)
+        if enabled != self.enabled:
+            self.enabled = enabled
+            self.scale.state(["!disabled"] if enabled else ["disabled"])
+            self._paint_mute()
 
 
 class DeviceSection:
-    """Ein Block für Ausgabe oder Eingabe: Lautstärke des Standardgeräts + Geräteliste."""
+    """Karte für Ausgabe oder Eingabe. Der Zustand bleibt erhalten, die Widgets werden bei
+    einem Designwechsel neu gebaut (build)."""
 
-    def __init__(self, app, parent, title, flow):
+    def __init__(self, app, flow, title, hint, icon):
         self.app = app
         self.flow = flow
-        self.frame = ttk.LabelFrame(parent, text=title, padding=8)
+        self.title, self.hint, self.icon = title, hint, icon
         self.default_id = None
         self.default_name = ""
         self.default_volume = 0
         self.muted = False
         self.devices = []          # [(id, name)] - wird auch vom Tray-Menü gelesen
+
+    def build(self, parent):
+        ui = self.app.ui
+        body = ui.card(parent, self.title, self.hint, icon=self.icon)
+        self.volume_row = VolumeRow(ui, body, "Lautstärke", self._set_volume, self._set_mute,
+                                    name_width=10, length=200)
+        self.volume_row.frame.pack(fill="x")
+        ui.caption(body, "Geräte").pack(fill="x", pady=(ui.px(16), ui.px(6)))
+        self.list_frame = tk.Frame(body, bg=body.cget("bg"))
+        self.list_frame.pack(fill="x")
+        self.items = {}
         self._signature = None
 
-        top = ttk.Frame(self.frame)
-        top.pack(fill="x")
-        self.volume_row = VolumeRow(top, 0, "Lautstärke", self._set_volume, self._set_mute,
-                                    label_width=11, length=240)
-
-        ttk.Label(self.frame, text="Gerät anklicken = als Standard verwenden:").pack(
-            anchor="w", pady=(8, 2))
-        self.list_frame = ttk.Frame(self.frame)
-        self.list_frame.pack(fill="x")
-        self.selected = tk.StringVar()
-        self.buttons = {}
-
+    # Aktionen
     def _set_volume(self, v):
         if self.default_id:
             self.app.safe(self.app.backend.set_device_volume, self.default_id, v)
@@ -381,60 +415,92 @@ class DeviceSection:
     def _set_mute(self, m):
         if self.default_id:
             self.app.safe(self.app.backend.set_device_mute, self.default_id, m)
-
-    def toggle_mute(self):
-        if self.default_id:
-            self._set_mute(not self.muted)
             self.app.refresh(reschedule=False)
 
-    def _choose(self, dev_id):
+    def toggle_mute(self):
+        self._set_mute(not self.muted)
+
+    def choose(self, dev_id):
+        name = dict(self.devices).get(dev_id, "")
         if self.app.safe(self.app.backend.set_default_device, dev_id) is not False:
-            self.app.status("Standardgerät geändert: " + self.buttons[dev_id].cget("text").strip())
+            self.app.status("Standardgerät: " + name, "ok")
         self.app.refresh(reschedule=False)
+
+    # Anzeige
+    def _item(self, dev_id, name):
+        """Geräte-Eintrag wie ein Zephyr-Menüeintrag: aktiv = roter Balken links."""
+        ui, t = self.app.ui, self.app.ui.t
+        item = tk.Frame(self.list_frame, bg=t["card"], cursor="hand2")
+        item.pack(fill="x", pady=1)
+        bar = tk.Frame(item, bg=t["card"], width=ui.px(3))
+        bar.pack(side="left", fill="y")
+        ic = tk.Label(item, text=ui.icon(self.icon), font=ui.f["icon_small"], bg=t["card"], fg=t["dim"],
+                      padx=ui.px(10), pady=ui.px(7))
+        ic.pack(side="left")
+        tx = tk.Label(item, text=name, font=ui.f["body"], bg=t["card"], fg=t["dim"], anchor="w")
+        tx.pack(side="left", fill="x", expand=True)
+        mark = tk.Label(item, text="", font=ui.f["small"], bg=t["card"], fg=t["accent"], padx=ui.px(10))
+        mark.pack(side="right")
+        parts = (item, bar, ic, tx, mark)
+        self.items[dev_id] = parts
+        for w in (item, ic, tx, mark):
+            w.bind("<ButtonRelease-1>", lambda e, i=dev_id: self.choose(i))
+            w.bind("<Enter>", lambda e, i=dev_id: self._paint(i, True))
+            w.bind("<Leave>", lambda e, i=dev_id: self._paint(i, False))
+
+    def _paint(self, dev_id, inside=False):
+        t, ui = self.app.ui.t, self.app.ui
+        item, bar, ic, tx, mark = self.items[dev_id]
+        active = dev_id == self.default_id
+        bg = t["hover"] if inside or active else t["card"]
+        for w in (item, ic, tx, mark):
+            w.configure(bg=bg)
+        bar.configure(bg=t["accent"] if active else bg)
+        ic.configure(fg=t["accent"] if active else t["dim"])
+        tx.configure(fg=t["text"] if active or inside else t["dim"],
+                     font=ui.f["btn"] if active else ui.f["body"])
+        mark.configure(text="Standard" if active else "")
 
     def show(self, devices):
         self.devices = [(d.id, d.name) for d in devices]
-        signature = tuple((d.id, d.name) for d in devices)
-        if signature != self._signature:
-            self._signature = signature
-            for w in self.list_frame.winfo_children():
-                w.destroy()
-            self.buttons = {}
-            if not devices:
-                ttk.Label(self.list_frame, text="(keine aktiven Geräte gefunden)").pack(anchor="w")
-            for d in devices:
-                b = tk.Radiobutton(self.list_frame, text="  " + d.name, value=d.id,
-                                   variable=self.selected, indicatoron=False, anchor="w",
-                                   selectcolor="#b9e6b9", padx=6, pady=3, width=46,
-                                   command=lambda i=d.id: self._choose(i))
-                b.pack(fill="x", pady=1)
-                self.buttons[d.id] = b
-
         default = next((d for d in devices if d.is_default), None)
         self.default_id = default.id if default else None
         self.default_name = default.name if default else ""
         self.default_volume = default.volume if default else 0
         self.muted = default.muted if default else False
-        self.selected.set(self.default_id or "")
-        for dev_id, b in self.buttons.items():
-            b.configure(font=self.app.bold_font if dev_id == self.default_id else self.app.normal_font)
+
+        signature = tuple(self.devices)
+        if signature != self._signature:
+            self._signature = signature
+            for w in self.list_frame.winfo_children():
+                w.destroy()
+            self.items = {}
+            if not devices:
+                self.app.ui.para(self.list_frame, "Keine aktiven Geräte gefunden.").pack(fill="x")
+            for d in devices:
+                self._item(d.id, d.name)
+        for dev_id in self.items:
+            self._paint(dev_id)
+        self.volume_row.set_enabled(default is not None)
         if default:
-            self.volume_row.set_enabled(True)
             self.volume_row.update(default.volume, default.muted)
-        else:
-            self.volume_row.set_enabled(False)
 
 
 class AppsSection:
-    def __init__(self, app, parent):
+    def __init__(self, app):
         self.app = app
-        self.frame = ttk.LabelFrame(parent, text="Anwendungen", padding=8)
-        self.inner = ttk.Frame(self.frame)
+
+    def build(self, parent):
+        ui = self.app.ui
+        body = ui.card(parent, "Anwendungen",
+                       "Lautstärke und Stumm für jedes Programm, das gerade Ton ausgibt.", icon="apps")
+        self.inner = tk.Frame(body, bg=body.cget("bg"))
         self.inner.pack(fill="x")
         self.rows = {}
         self._signature = None
 
     def show(self, apps):
+        ui = self.app.ui
         signature = tuple((a.key, a.name) for a in apps)
         if signature != self._signature:
             self._signature = signature
@@ -442,19 +508,20 @@ class AppsSection:
                 w.destroy()
             self.rows = {}
             if not apps:
-                ttk.Label(self.inner, text="(keine Anwendung gibt gerade Audio aus)").grid(
-                    row=0, column=0, sticky="w")
+                ui.para(self.inner, "Gerade gibt keine Anwendung Ton aus.").grid(row=0, column=0, sticky="w")
             cols = APP_COLUMNS if len(apps) <= 8 else APP_COLUMNS + 1
             rows_per_col = (len(apps) + cols - 1) // cols if apps else 0
             for idx, a in enumerate(apps):
                 col, row = divmod(idx, rows_per_col)
-                cell = ttk.Frame(self.inner)
-                cell.grid(row=row, column=col, sticky="w", padx=(0 if col == 0 else 24, 0))
-                self.rows[a.key] = VolumeRow(
-                    cell, 0, a.name,
+                vr = VolumeRow(
+                    ui, self.inner, a.name,
                     lambda v, k=a.key: self.app.safe(self.app.backend.set_app_volume, k, v),
-                    lambda m, k=a.key: self.app.safe(self.app.backend.set_app_mute, k, m),
-                    label_width=18, length=200)
+                    lambda m, k=a.key: (self.app.safe(self.app.backend.set_app_mute, k, m),
+                                        self.app.refresh(reschedule=False)),
+                    name_width=14, length=170 if cols == 2 else 120)
+                vr.frame.grid(row=row, column=col, sticky="w", pady=ui.px(3),
+                              padx=(0 if col == 0 else ui.px(28), 0))
+                self.rows[a.key] = vr
         for a in apps:
             self.rows[a.key].update(a.volume, a.muted)
 
@@ -478,19 +545,19 @@ class TrayIcon:
         M, I = pystray.Menu, pystray.MenuItem
         self._M, self._I = M, I
         menu = M(
-            I("SoundControl öffnen / verstecken", self._action(app.toggle_window), default=True),
+            I("SoundControl öffnen / verstecken", self._action(lambda: app.toggle_window()), default=True),
             I("Ausgabegerät", M(lambda: self._device_items(app.output))),
             I("Eingabegerät", M(lambda: self._device_items(app.input))),
             M.SEPARATOR,
-            I("Ausgabe stumm", self._action(app.output.toggle_mute),
+            I("Ausgabe stumm", self._action(lambda: app.output.toggle_mute()),
               checked=lambda item: app.output.muted),
-            I("Mikrofon stumm", self._action(app.input.toggle_mute),
+            I("Mikrofon stumm", self._action(lambda: app.input.toggle_mute()),
               checked=lambda item: app.input.muted),
             M.SEPARATOR,
-            I("Beenden", self._action(app.quit)),
+            I("Beenden", self._action(lambda: app.quit())),
         )
         try:
-            self.icon = pystray.Icon("SoundControl", self._make_image(Image, ImageDraw),
+            self.icon = pystray.Icon("SoundControl", self._make_image(Image, ImageDraw, app.ui.t["accent"]),
                                      "SoundControl", menu)
             # eigener Hintergrund-Thread (unter Windows unproblematisch)
             threading.Thread(target=self.icon.run, daemon=True).start()
@@ -498,11 +565,11 @@ class TrayIcon:
             self.icon = None
 
     @staticmethod
-    def _make_image(Image, ImageDraw):
-        """Einfaches Lautsprecher-Symbol zeichnen."""
+    def _make_image(Image, ImageDraw, accent="#e5484d"):
+        """Lautsprecher-Symbol im Zephyr-Stil: flaches Quadrat in Akzentfarbe, weißes Symbol."""
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle((0, 0, 63, 63), radius=14, fill=(40, 120, 70, 255))
+        d.rectangle((0, 0, 63, 63), fill=accent)
         d.polygon([(12, 25), (22, 25), (34, 13), (34, 51), (22, 39), (12, 39)],
                   fill=(255, 255, 255, 255))
         d.arc((26, 20, 46, 44), -50, 50, fill=(255, 255, 255, 255), width=4)
@@ -518,7 +585,7 @@ class TrayIcon:
         items = []
         for dev_id, name in section.devices:
             items.append(self._I(
-                name, self._action(section._choose, dev_id), radio=True,
+                name, self._action(section.choose, dev_id), radio=True,
                 checked=(lambda i: lambda item: section.default_id == i)(dev_id)))
         if not items:
             items.append(self._I("(keine Geräte)", None, enabled=False))
@@ -572,44 +639,24 @@ class SoundControlApp:
     def __init__(self, root, backend, start_hidden=False):
         self.root = root
         self.backend = backend
-        self._after_id = None
         self._tray_hint_shown = False
+        self._status = ("Bereit", "ok")
+        self.settings = z.Settings("SoundControl")
+        self.topmost = bool(self.settings.get("topmost", False))
 
         root.title("SoundControl")
         root.resizable(False, False)
-        try:
-            ttk.Style().theme_use("vista" if sys.platform == "win32" else "clam")
-        except tk.TclError:
-            pass
+        self.ui = z.Zephyr(root, self.settings.get("theme", "dark"),
+                           self.settings.get("palette", z.DEFAULT_PALETTE))
 
-        import tkinter.font as tkfont
-        self.normal_font = tkfont.nametofont("TkDefaultFont").copy()
-        self.bold_font = self.normal_font.copy()
-        self.bold_font.configure(weight="bold")
+        self.output = DeviceSection(self, E_RENDER, "Ausgabe",
+                                    "Klick auf ein Gerät macht es zum Standard für den Ton.", "speaker")
+        self.input = DeviceSection(self, E_CAPTURE, "Eingabe",
+                                   "Klick auf ein Mikrofon macht es zum Standard für die Aufnahme.", "mic")
+        self.apps = AppsSection(self)
 
-        main = ttk.Frame(root, padding=10)
-        main.pack(fill="both", expand=True)
-
-        self.output = DeviceSection(self, main, "Ausgabe (Lautsprecher / Kopfhörer)", E_RENDER)
-        self.input = DeviceSection(self, main, "Eingabe (Mikrofone)", E_CAPTURE)
-        self.apps = AppsSection(self, main)
-
-        self.output.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        self.input.frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        self.apps.frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
-        main.columnconfigure(0, weight=1, uniform="half")
-        main.columnconfigure(1, weight=1, uniform="half")
-
-        bottom = ttk.Frame(main)
-        bottom.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
-        self.status_var = tk.StringVar(value="Bereit.")
-        ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(side="left")
-        self.topmost = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bottom, text="Immer im Vordergrund", variable=self.topmost,
-                        command=lambda: root.attributes("-topmost", self.topmost.get())
-                        ).pack(side="right")
-        ttk.Button(bottom, text="Aktualisieren",
-                   command=lambda: self.refresh(reschedule=False)).pack(side="right", padx=8)
+        self.build()
+        root.attributes("-topmost", self.topmost)
 
         self.tray = TrayIcon(self)
         root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
@@ -619,6 +666,87 @@ class SoundControlApp:
         self._poll_tray()
         if start_hidden and self.tray.icon:
             root.withdraw()
+
+    # -- Aufbau (auch nach Wechsel Hell/Dunkel bzw. Palette) -----------------------
+    def build(self):
+        ui, t, px = self.ui, self.ui.t, self.ui.px
+        for child in self.root.winfo_children():
+            child.destroy()
+
+        # Kopf: Marke links, Schalter rechts
+        head = tk.Frame(self.root, bg=t["bg"])
+        head.pack(fill="x", padx=px(24), pady=(px(20), px(14)))
+        tk.Label(head, text=ui.icon("volume"), font=ui.f["icon"], bg=t["accent"], fg=t["on_accent"],
+                 padx=px(8), pady=px(6)).pack(side="left")
+        names = tk.Frame(head, bg=t["bg"])
+        names.pack(side="left", padx=px(12))
+        tk.Label(names, text="SoundControl", font=ui.f["title"], bg=t["bg"], fg=t["text"]).pack(anchor="w")
+        tk.Label(names, text="Ausgabe, Eingabe und Anwendungen auf einen Blick", font=ui.f["body"],
+                 bg=t["bg"], fg=t["dim"]).pack(anchor="w")
+
+        right = tk.Frame(head, bg=t["bg"])
+        right.pack(side="right")
+        ui.button(right, "Helles Design" if ui.dark else "Dunkles Design", self.toggle_theme, "ghost",
+                  icon="sun" if ui.dark else "moon").pack(side="right")
+        self.pin_btn = ui.button(right, "Immer vorne", self.toggle_topmost,
+                                 "primary" if self.topmost else "ghost", icon="pin")
+        self.pin_btn.pack(side="right", padx=(0, px(4)))
+        ui.button(right, "Aktualisieren", lambda: self.refresh(reschedule=False), "ghost",
+                  icon="refresh").pack(side="right", padx=(0, px(4)))
+        self.palette_box = ui.combobox(right, list(z.PALETTES), width=16)
+        self.palette_box.set(ui.palette)
+        self.palette_box.bind("<<ComboboxSelected>>", lambda e: self.set_palette(self.palette_box.get()))
+        self.palette_box.pack(side="right", padx=(0, px(10)))
+
+        # Statuszeile ganz unten
+        status = tk.Frame(self.root, bg=t["card"], highlightthickness=1, highlightbackground=t["line"])
+        status.pack(side="bottom", fill="x")
+        self.status_dot = tk.Label(status, text="●", font=ui.f["small"], bg=t["card"], fg=t["ok"])
+        self.status_dot.pack(side="left", padx=(px(18), px(6)), pady=px(8))
+        self.status_label = tk.Label(status, font=ui.f["small"], bg=t["card"], fg=t["dim"], anchor="w")
+        self.status_label.pack(side="left", fill="x", expand=True)
+        self.status_right = tk.Label(status, font=ui.f["small"], bg=t["card"], fg=t["dim"])
+        self.status_right.pack(side="right", padx=px(18))
+
+        # Karten: oben Ausgabe | Eingabe, darunter Anwendungen
+        main = tk.Frame(self.root, bg=t["bg"])
+        main.pack(fill="both", expand=True, padx=px(24), pady=(0, px(6)))
+        top = tk.Frame(main, bg=t["bg"])
+        top.pack(fill="x")
+        left_col = tk.Frame(top, bg=t["bg"])
+        right_col = tk.Frame(top, bg=t["bg"])
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, px(7)))
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(px(7), 0))
+        top.columnconfigure(0, weight=1, uniform="half")
+        top.columnconfigure(1, weight=1, uniform="half")
+        self.output.build(left_col)
+        self.input.build(right_col)
+        self.apps.build(main)
+
+        self.status(*self._status)
+
+    def toggle_theme(self):
+        self.ui.apply("light" if self.ui.dark else "dark")
+        self.settings["theme"] = self.ui.theme
+        self.settings.save()
+        self.build()
+        self.refresh(reschedule=False)
+
+    def set_palette(self, name):
+        self.ui.apply(self.ui.theme, name)
+        self.settings["palette"] = self.ui.palette
+        self.settings.save()
+        self.build()
+        self.refresh(reschedule=False)
+        self.status("Farbpalette: " + self.ui.palette, "ok")
+
+    def toggle_topmost(self):
+        self.topmost = not self.topmost
+        self.root.attributes("-topmost", self.topmost)
+        self.settings["topmost"] = self.topmost
+        self.settings.save()
+        self.build()
+        self.refresh(reschedule=False)
 
     # -- Fenster / Tray -------------------------------------------------------
     def _poll_tray(self):
@@ -656,14 +784,19 @@ class SoundControlApp:
         self.tray.stop()
         self.root.destroy()
 
-    def status(self, text):
-        self.status_var.set(text)
+    # -- Status / Fehler / Aktualisieren -------------------------------------------
+    def status(self, text, kind="ok"):
+        """kind: ok (grün) · busy (gelb) · err (rot) · info (grau)."""
+        self._status = (text, kind)
+        t = self.ui.t
+        self.status_label.configure(text=text)
+        self.status_dot.configure(fg={"ok": t["ok"], "busy": t["warn"], "err": t["err"], "info": t["dim"]}[kind])
 
     def safe(self, func, *args):
         try:
             return func(*args)
         except Exception as exc:   # COM-Fehler sollen die Oberfläche nicht beenden
-            self.status("Fehler: %s" % exc)
+            self.status("Fehler: %s" % exc, "err")
             return False
 
     def refresh(self, reschedule=True):
@@ -673,11 +806,13 @@ class SoundControlApp:
             if self.root.state() != "withdrawn":   # Anwendungen nur bei sichtbarem Fenster
                 self.apps.show(self.backend.list_apps())
         except Exception as exc:
-            self.status("Fehler beim Einlesen: %s" % exc)
+            self.status("Fehler beim Einlesen: %s" % exc, "err")
+        tray = "Tray aktiv" if getattr(self, "tray", None) and self.tray.icon else "ohne Tray"
+        self.status_right.configure(text="%s · Zephyr %s" % (tray, z.VERSION))
         if hasattr(self, "tray"):
             self.tray.update()
         if reschedule:
-            self._after_id = self.root.after(REFRESH_MS, self.refresh)
+            self.root.after(REFRESH_MS, self.refresh)
 
 
 def main():
@@ -686,6 +821,7 @@ def main():
         print("SoundControl läuft nur unter Windows. Zum Ansehen der Oberfläche: --demo")
         sys.exit(1)
     backend = DemoAudioBackend() if demo else WindowsAudioBackend()
+    z.dpi_aware()
     root = tk.Tk()
     SoundControlApp(root, backend, start_hidden="--minimiert" in sys.argv)
     root.mainloop()
