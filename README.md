@@ -16,10 +16,7 @@ auch mit dem Mausrad bedienen. Optional: „Immer im Vordergrund“.
 ## Starten
 
 1. Python 3.8+ für Windows installieren (Haken bei „Add Python to PATH“ setzen).
-2. Abhängigkeiten installieren:
-   ```
-   pip install -r requirements.txt
-   ```
+2. `requirements.bat` doppelklicken (installiert alle benötigten Pakete).
 3. `start.bat` doppelklicken (oder `python soundcontrol.py`).
 
 ## EXE erzeugen
