@@ -13,6 +13,15 @@ Das Fenster aktualisiert sich automatisch alle 1,5 Sekunden (neue Geräte,
 neu gestartete Programme, Änderungen aus dem Windows-Mixer). Regler lassen sich
 auch mit dem Mausrad bedienen. Optional: „Immer im Vordergrund“.
 
+## Tray-Icon (Infobereich unten rechts)
+
+- **Linksklick** auf das Lautsprecher-Symbol: Fenster öffnen bzw. verstecken.
+- **Rechtsklick**: Menü mit Ausgabegerät/Eingabegerät umschalten, „Ausgabe stumm“,
+  „Mikrofon stumm“ und „Beenden“.
+- **Minimieren** oder **X** schickt das Fenster in den Tray, das Programm läuft weiter.
+  Ganz beenden: Rechtsklick auf das Symbol → „Beenden“.
+- Mit `--minimiert` startet das Programm direkt im Tray (praktisch für den Autostart).
+
 ## Starten
 
 1. Python 3.8+ für Windows installieren (Haken bei „Add Python to PATH“ setzen).

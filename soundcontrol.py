@@ -7,14 +7,22 @@ Ein einziges Fenster (ohne Scrollen) mit:
   * Lautstärke + Stumm für das aktuelle Ausgabe- und Eingabegerät
   * Lautstärke + Stumm für jede Anwendung, die gerade Audio nutzt
 
-Benötigt: Windows, Python 3.8+, pycaw, comtypes, psutil
+Benötigt: Windows, Python 3.8+, pycaw, comtypes, psutil, pystray, Pillow
     pip install -r requirements.txt
 
 Start:  python soundcontrol.py
+Direkt im Infobereich (Tray) starten:  python soundcontrol.py --minimiert
 Demo ohne Windows (nur Oberfläche ansehen):  python soundcontrol.py --demo
+
+Tray-Icon (benötigt pystray + Pillow): Linksklick öffnet/versteckt das Fenster,
+Rechtsklick zeigt ein Menü zum schnellen Umschalten und Stummschalten.
+Minimieren oder Schließen (X) schickt das Fenster in den Tray, "Beenden" im
+Tray-Menü beendet das Programm.
 """
 
+import queue
 import sys
+import threading
 import tkinter as tk
 from tkinter import ttk
 
@@ -348,6 +356,10 @@ class DeviceSection:
         self.flow = flow
         self.frame = ttk.LabelFrame(parent, text=title, padding=8)
         self.default_id = None
+        self.default_name = ""
+        self.default_volume = 0
+        self.muted = False
+        self.devices = []          # [(id, name)] - wird auch vom Tray-Menü gelesen
         self._signature = None
 
         top = ttk.Frame(self.frame)
@@ -370,12 +382,18 @@ class DeviceSection:
         if self.default_id:
             self.app.safe(self.app.backend.set_device_mute, self.default_id, m)
 
+    def toggle_mute(self):
+        if self.default_id:
+            self._set_mute(not self.muted)
+            self.app.refresh(reschedule=False)
+
     def _choose(self, dev_id):
         if self.app.safe(self.app.backend.set_default_device, dev_id) is not False:
             self.app.status("Standardgerät geändert: " + self.buttons[dev_id].cget("text").strip())
         self.app.refresh(reschedule=False)
 
     def show(self, devices):
+        self.devices = [(d.id, d.name) for d in devices]
         signature = tuple((d.id, d.name) for d in devices)
         if signature != self._signature:
             self._signature = signature
@@ -394,6 +412,9 @@ class DeviceSection:
 
         default = next((d for d in devices if d.is_default), None)
         self.default_id = default.id if default else None
+        self.default_name = default.name if default else ""
+        self.default_volume = default.volume if default else 0
+        self.muted = default.muted if default else False
         self.selected.set(self.default_id or "")
         for dev_id, b in self.buttons.items():
             b.configure(font=self.app.bold_font if dev_id == self.default_id else self.app.normal_font)
@@ -438,11 +459,121 @@ class AppsSection:
             self.rows[a.key].update(a.volume, a.muted)
 
 
+class TrayIcon:
+    """Symbol im Infobereich (pystray). Läuft in eigenem Thread; alle Aktionen
+    werden über eine Queue an den Tk-Hauptthread übergeben."""
+
+    def __init__(self, app):
+        self.app = app
+        self.queue = queue.Queue()
+        self.icon = None
+        self._menu_signature = None
+        self._title = None
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except Exception:
+            return   # ohne pystray/Pillow läuft das Programm einfach ohne Tray-Icon
+
+        M, I = pystray.Menu, pystray.MenuItem
+        self._M, self._I = M, I
+        menu = M(
+            I("SoundControl öffnen / verstecken", self._action(app.toggle_window), default=True),
+            I("Ausgabegerät", M(lambda: self._device_items(app.output))),
+            I("Eingabegerät", M(lambda: self._device_items(app.input))),
+            M.SEPARATOR,
+            I("Ausgabe stumm", self._action(app.output.toggle_mute),
+              checked=lambda item: app.output.muted),
+            I("Mikrofon stumm", self._action(app.input.toggle_mute),
+              checked=lambda item: app.input.muted),
+            M.SEPARATOR,
+            I("Beenden", self._action(app.quit)),
+        )
+        try:
+            self.icon = pystray.Icon("SoundControl", self._make_image(Image, ImageDraw),
+                                     "SoundControl", menu)
+            # eigener Hintergrund-Thread (unter Windows unproblematisch)
+            threading.Thread(target=self.icon.run, daemon=True).start()
+        except Exception:
+            self.icon = None
+
+    @staticmethod
+    def _make_image(Image, ImageDraw):
+        """Einfaches Lautsprecher-Symbol zeichnen."""
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle((0, 0, 63, 63), radius=14, fill=(40, 120, 70, 255))
+        d.polygon([(12, 25), (22, 25), (34, 13), (34, 51), (22, 39), (12, 39)],
+                  fill=(255, 255, 255, 255))
+        d.arc((26, 20, 46, 44), -50, 50, fill=(255, 255, 255, 255), width=4)
+        d.arc((26, 11, 56, 53), -50, 50, fill=(255, 255, 255, 255), width=4)
+        return img
+
+    def _action(self, func, *args):
+        def run():
+            self.queue.put((func, args))
+        return run
+
+    def _device_items(self, section):
+        items = []
+        for dev_id, name in section.devices:
+            items.append(self._I(
+                name, self._action(section._choose, dev_id), radio=True,
+                checked=(lambda i: lambda item: section.default_id == i)(dev_id)))
+        if not items:
+            items.append(self._I("(keine Geräte)", None, enabled=False))
+        return items
+
+    def process_queue(self):
+        while True:
+            try:
+                func, args = self.queue.get_nowait()
+            except queue.Empty:
+                return
+            func(*args)
+
+    def update(self):
+        """Tooltip und Menü an den aktuellen Zustand anpassen."""
+        if not self.icon:
+            return
+        out = self.app.output
+        title = "SoundControl\n%s: %s" % (
+            out.default_name or "kein Ausgabegerät",
+            "stumm" if out.muted else "%d %%" % out.default_volume)
+        title = title[:120]
+        sig = (tuple(out.devices), out.default_id, out.muted,
+               tuple(self.app.input.devices), self.app.input.default_id, self.app.input.muted)
+        try:
+            if title != self._title:
+                self._title = title
+                self.icon.title = title
+            if sig != self._menu_signature:
+                self._menu_signature = sig
+                self.icon.update_menu()
+        except Exception:
+            pass
+
+    def notify(self, text):
+        if self.icon:
+            try:
+                self.icon.notify(text, "SoundControl")
+            except Exception:
+                pass
+
+    def stop(self):
+        if self.icon:
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
+
+
 class SoundControlApp:
-    def __init__(self, root, backend):
+    def __init__(self, root, backend, start_hidden=False):
         self.root = root
         self.backend = backend
         self._after_id = None
+        self._tray_hint_shown = False
 
         root.title("SoundControl")
         root.resizable(False, False)
@@ -480,7 +611,50 @@ class SoundControlApp:
         ttk.Button(bottom, text="Aktualisieren",
                    command=lambda: self.refresh(reschedule=False)).pack(side="right", padx=8)
 
+        self.tray = TrayIcon(self)
+        root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        root.bind("<Unmap>", self._on_unmap)
+
         self.refresh()
+        self._poll_tray()
+        if start_hidden and self.tray.icon:
+            root.withdraw()
+
+    # -- Fenster / Tray -------------------------------------------------------
+    def _poll_tray(self):
+        self.tray.process_queue()
+        self.root.after(100, self._poll_tray)
+
+    def _on_unmap(self, event):
+        # Minimieren -> statt Taskleiste in den Tray
+        if event.widget is self.root and self.tray.icon and self.root.state() == "iconic":
+            self.root.after(0, self.hide_to_tray)
+
+    def hide_to_tray(self):
+        if not self.tray.icon:      # kein Tray verfügbar -> X beendet wie gewohnt
+            self.quit()
+            return
+        self.root.withdraw()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            self.tray.notify("SoundControl läuft im Infobereich weiter. "
+                             "Klick auf das Symbol öffnet das Fenster.")
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.refresh(reschedule=False)
+
+    def toggle_window(self):
+        if self.root.state() in ("withdrawn", "iconic"):
+            self.show_window()
+        else:
+            self.root.withdraw()
+
+    def quit(self):
+        self.tray.stop()
+        self.root.destroy()
 
     def status(self, text):
         self.status_var.set(text)
@@ -496,9 +670,12 @@ class SoundControlApp:
         try:
             self.output.show(self.backend.list_devices(E_RENDER))
             self.input.show(self.backend.list_devices(E_CAPTURE))
-            self.apps.show(self.backend.list_apps())
+            if self.root.state() != "withdrawn":   # Anwendungen nur bei sichtbarem Fenster
+                self.apps.show(self.backend.list_apps())
         except Exception as exc:
             self.status("Fehler beim Einlesen: %s" % exc)
+        if hasattr(self, "tray"):
+            self.tray.update()
         if reschedule:
             self._after_id = self.root.after(REFRESH_MS, self.refresh)
 
@@ -510,7 +687,7 @@ def main():
         sys.exit(1)
     backend = DemoAudioBackend() if demo else WindowsAudioBackend()
     root = tk.Tk()
-    SoundControlApp(root, backend)
+    SoundControlApp(root, backend, start_hidden="--minimiert" in sys.argv)
     root.mainloop()
 
 
